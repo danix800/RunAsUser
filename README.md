@@ -28,6 +28,10 @@ If you want to use the results of the output immediately, you can use the -Captu
     $JSON = invoke-ascurrentuser -scriptblock $scriptblock -CaptureOutput
     $JSON | ConvertFrom-Json
 
+You can also pipe objects to `Invoke-AsCurrentUser`. The scriptblock will be executed for each object from the pipeline. The `$_` or `$PSItem` variable can be used to access the current pipeline object. The command will also output objects to the pipeline, which can be piped to other commands.
+
+    Get-Process | Invoke-AsCurrentUser -ScriptBlock { $_.Name } -CaptureOutput | Sort-Object
+
 For longer scripts, that go over the limit of the command line cache, you can use the option -CacheToDisk. This will write the script to the $ENV:TEMP folder, and delete when execution has been done.
 
     $scriptblock = { SUPERLONGSCRIPTHERE }
