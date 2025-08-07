@@ -1,0 +1,15 @@
+[project]
+name = "run-as-user"
+version = "0.1.0"
+description = "A utility to run commands as the currently logged-in user from a SYSTEM context."
+authors = [{ name = "Cline", email = "cline@example.com" }]
+requires-python = ">=3.8"
+dependencies = [
+    "pywin32>=306"
+]
+
+[project.scripts]
+run-as-user = "run_as_user.cli:main"
+
+[tool.uv]
+# You can specify uv-specific configurations here if needed.
