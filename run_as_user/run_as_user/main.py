@@ -7,7 +7,7 @@ import win32event
 import win32pipe
 import win32file
 import threading
-import os
+import sys
 from contextlib import ExitStack
 
 def get_current_user_token():
@@ -24,103 +24,101 @@ def get_current_user_token():
                 continue
     raise Exception("No active user session found with a logged-on user.")
 
-def run_as_current_user(command, input_data=None, wait=True, log_file=None):
+def run_as_current_user(command, log_file=None):
     """
-    Runs a command as the currently logged-in user with full stdio redirection.
+    Runs a command as the currently logged-in user with real-time,
+    interactive stdio forwarding.
 
     Args:
         command (str): The command to execute.
-        input_data (bytes, optional): Data to be sent to the process's stdin.
-        wait (bool): Whether to wait for the command to complete.
         log_file (str, optional): Path to a file for logging status messages.
 
     Returns:
-        A tuple (stdout_bytes, stderr_bytes) if wait is True, otherwise None.
+        The exit code of the child process.
     """
     def log_message(message):
         if log_file:
             with open(log_file, "a") as f:
-                f.write(f"{message}\n")
+                f.write(f"[{threading.get_ident()}] {message}\n")
 
-    user_token = None
-    
     with ExitStack() as stack:
+        user_token = get_current_user_token()
+        stack.callback(win32api.CloseHandle, user_token)
+
         sa = win32security.SECURITY_ATTRIBUTES()
         sa.bInheritHandle = 1
         
+        # Create pipes for stdio
         stdin_read, stdin_write = win32pipe.CreatePipe(sa, 0)
+        stdout_read, stdout_write = win32pipe.CreatePipe(sa, 0)
+        stderr_read, stderr_write = win32pipe.CreatePipe(sa, 0)
+        
+        # Ensure handles are closed
         stack.callback(win32api.CloseHandle, stdin_read)
         stack.callback(win32api.CloseHandle, stdin_write)
-
-        stdout_read, stdout_write = win32pipe.CreatePipe(sa, 0)
         stack.callback(win32api.CloseHandle, stdout_read)
         stack.callback(win32api.CloseHandle, stdout_write)
-
-        stderr_read, stderr_write = win32pipe.CreatePipe(sa, 0)
         stack.callback(win32api.CloseHandle, stderr_read)
         stack.callback(win32api.CloseHandle, stderr_write)
 
-        try:
-            user_token = get_current_user_token()
-            stack.callback(win32api.CloseHandle, user_token)
-            
-            startup_info = win32process.STARTUPINFO()
-            startup_info.dwFlags |= win32process.STARTF_USESTDHANDLES
-            startup_info.hStdInput = stdin_read
-            startup_info.hStdOutput = stdout_write
-            startup_info.hStdError = stderr_write
+        startup_info = win32process.STARTUPINFO()
+        startup_info.dwFlags |= win32process.STARTF_USESTDHANDLES
+        startup_info.hStdInput = stdin_read
+        startup_info.hStdOutput = stdout_write
+        startup_info.hStdError = stderr_write
 
-            proc_handle, thread_handle, proc_id, thread_id = win32process.CreateProcessAsUser(
-                user_token, None, command, None, None, True, 0, None, None, startup_info
-            )
-            stack.callback(win32api.CloseHandle, proc_handle)
-            stack.callback(win32api.CloseHandle, thread_handle)
+        proc_handle, thread_handle, proc_id, thread_id = win32process.CreateProcessAsUser(
+            user_token, None, command, None, None, True, 0, None, None, startup_info
+        )
+        stack.callback(win32api.CloseHandle, proc_handle)
+        stack.callback(win32api.CloseHandle, thread_handle)
 
-            log_message(f"Successfully started process '{command}' with PID: {proc_id}")
+        log_message(f"Started process '{command}' with PID: {proc_id}")
 
-            # Child process now owns these handles, close them in the parent.
-            win32api.CloseHandle(stdin_read)
-            win32api.CloseHandle(stdout_write)
-            win32api.CloseHandle(stderr_write)
+        # Close handles not needed by the parent
+        win32api.CloseHandle(stdin_read)
+        win32api.CloseHandle(stdout_write)
+        win32api.CloseHandle(stderr_write)
 
-            if input_data:
-                win32file.WriteFile(stdin_write, input_data)
-            win32api.CloseHandle(stdin_write)
-
-            if not wait:
-                return None, None
-
-            stdout_chunks = []
-            stderr_chunks = []
-
-            def read_pipe(pipe, chunk_list):
-                while True:
-                    try:
-                        hr, data = win32file.ReadFile(pipe, 4096)
+        def forward_stream(read_h, write_h, name):
+            log_message(f"Starting forwarder thread for {name}")
+            while True:
+                try:
+                    if name == "stdin": # Special handling for stdin
+                        data = sys.stdin.buffer.read(1)
                         if not data: break
-                        chunk_list.append(data)
-                    except win32api.error: break
-                win32api.CloseHandle(pipe)
+                    else:
+                        hr, data = win32file.ReadFile(read_h, 4096)
+                        if not data: break
+                    
+                    if name == "stdin":
+                        win32file.WriteFile(write_h, data)
+                    else:
+                        write_h.buffer.write(data)
+                        write_h.buffer.flush()
+                except (IOError, BrokenPipeError, win32api.error):
+                    break
+            log_message(f"Forwarder thread for {name} finished.")
+            if name == "stdin": win32api.CloseHandle(write_h)
+            else: win32api.CloseHandle(read_h)
 
-            stdout_thread = threading.Thread(target=read_pipe, args=(stdout_read, stdout_chunks))
-            stderr_thread = threading.Thread(target=read_pipe, args=(stderr_read, stderr_chunks))
+        # Create and start threads
+        stdin_thread = threading.Thread(target=forward_stream, args=(None, stdin_write, "stdin"))
+        stdout_thread = threading.Thread(target=forward_stream, args=(stdout_read, sys.stdout, "stdout"))
+        stderr_thread = threading.Thread(target=forward_stream, args=(stderr_read, sys.stderr, "stderr"))
+        
+        stdin_thread.daemon = True # Allow main thread to exit even if this is blocked
+        stdout_thread.start()
+        stderr_thread.start()
+        stdin_thread.start()
 
-            stdout_thread.start()
-            stderr_thread.start()
+        log_message("Waiting for process to terminate...")
+        win32event.WaitForSingleObject(proc_handle, win32event.INFINITE)
+        exit_code = win32process.GetExitCodeProcess(proc_handle)
+        log_message(f"Process terminated with exit code {exit_code}.")
 
-            log_message("Waiting for the process to complete...")
-            win32event.WaitForSingleObject(proc_handle, win32event.INFINITE)
-            
-            stdout_thread.join()
-            stderr_thread.join()
-            
-            log_message("Process completed.")
-
-            return b"".join(stdout_chunks), b"".join(stderr_chunks)
-
-        except Exception as e:
-            log_message(f"An error occurred: {e}")
-            if hasattr(e, 'winerror'):
-                log_message(f"Win32 Error Code: {e.winerror}")
-                log_message(f"Win32 Error Message: {win32api.FormatMessage(e.winerror)}")
-            return None, None
+        # Wait for output threads to finish
+        stdout_thread.join()
+        stderr_thread.join()
+        
+        return exit_code
