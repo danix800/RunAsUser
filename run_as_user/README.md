@@ -56,6 +56,36 @@ To keep the `stdio` streams clean for piping, all internal logging from the tool
 run-as-user --log-file C:\temp\run-as-user.log cmd.exe /c "whoami"
 ```
 
+### Development and Running with `uv`
+
+You can use `uv` to run the command-line tool directly without a full installation, which is useful for development.
+
+1.  **Create a virtual environment and install dependencies:**
+    From the `run_as_user` directory:
+    ```bash
+    # Create and activate a virtual environment
+    uv venv
+    source .venv/bin/activate  # On Windows, use `.venv\Scripts\activate`
+
+    # Install the project in editable mode, including dependencies
+    uv pip install -e .
+    ```
+    Installing in "editable" mode (`-e`) is best for development, as it links the installed package back to your source files.
+
+2.  **Run the tool directly:**
+    After installation (normal or editable), the `run-as-user` script is available directly in your virtual environment's path:
+    ```bash
+    # Now you can run the command directly
+    run-as-user --help
+    
+    # Example execution
+    run-as-user cmd.exe /c "echo Hello from dev mode"
+    ```
+    Alternatively, you can use `uv run` to execute commands within the project's managed environment without activating it first:
+    ```bash
+    uv run run-as-user cmd.exe /c "echo Hello from uv run"
+    ```
+
 ### As a Library
 
 You can also import and use the core functionality directly in your Python code.
